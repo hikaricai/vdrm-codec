@@ -1,9 +1,8 @@
-use geo::{EuclideanDistance, EuclideanLength, LineIntersection, Vector2DOps};
+use geo::{EuclideanDistance, EuclideanLength, LineInterpolatePoint, LineIntersection, Vector2DOps};
 use std::collections::BTreeMap;
-use std::ops::Sub;
 
 const W_PIXELS: usize = 64;
-const H_PIXELS: usize = 64;
+const H_PIXELS: usize = 32;
 const TOTAL_ANGLES: usize = 100;
 
 const CIRCLE_R: f64 = 1.;
@@ -11,30 +10,37 @@ const CIRCLE_R: f64 = 1.;
 type PixelColor = u32;
 type PixelXY = (u32, u32);
 
-struct PixelZInfo {
-    angle: u32,
-    h: f64,
-    screen_idx: usize,
+struct ScreenPixel {
+    idx: usize,
     addr: u32,
     pixel: u32,
 }
 
-impl PixelZInfo {
-    fn to_screen_line(&self) -> ScreenLine {
-        ScreenLine {
-            screen_idx: 0,
-            addr: 0,
-            pixels: [None; H_PIXELS],
-        }
-    }
+struct PixelZInfo {
+    angle: u32,
+    // 从底部向下增长
+    value: f64,
+    pixel: u32,
+    screen_pixel: ScreenPixel,
 }
 
 type PixelXYMap = BTreeMap<PixelXY, Vec<PixelZInfo>>;
 
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+struct ScreenLineAddr {
+    screen_idx: usize,
+    addr: u32,
+}
+#[derive(Debug, Copy, Clone, Default)]
+struct ScreenLinePixels {
+    pixels: [Option<PixelColor>; W_PIXELS],
+}
+
+#[derive(Debug, Copy, Clone)]
 struct ScreenLine {
     screen_idx: usize,
     addr: u32,
-    pixels: [Option<PixelColor>; H_PIXELS],
+    pixels: [Option<PixelColor>; W_PIXELS],
 }
 
 type AngleMap = BTreeMap<u32, Vec<ScreenLine>>;
@@ -45,7 +51,7 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
         for y in 0..W_PIXELS {
             for angle in 0..TOTAL_ANGLES {
                 let (angle, x, y) = (angle as u32, x as u32, y as u32);
-                let Some(z) = cacl_height(&lines, angle, x, y) else {
+                let Some(z) = cacl_z_pixel(&lines, angle, x, y) else {
                     continue;
                 };
                 let entry = xy_map.entry((x, y)).or_default();
@@ -54,7 +60,7 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
         }
     }
     for z_info in xy_map.values_mut() {
-        z_info.sort_by_key(|v| v.pixel);
+        z_info.sort_by_key(|v| v.screen_pixel);
     }
     xy_map
 }
@@ -62,57 +68,121 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
 type PixelSurface = Vec<(u32, u32, u32)>;
 type FloatSurface = Vec<(f64, f64, f64)>;
 
-pub fn encode(pixel_surface: PixelSurface) -> AngleMap {
-    let point_u = (-2., 0.);
-    let point_v = (-1., -1.);
-    let point_w = (1., -1.);
-    let point_x = (1. - 0.5_f64.sqrt(), 1. + 0.5_f64.sqrt());
-    let point_y = (1. + 0.5_f64.sqrt(), 1. - 0.5_f64.sqrt());
-    let point_z = (-1., 3.0_f64.sqrt());
-    let lines = [(point_v, point_w), (point_x, point_y), (point_z, point_u)];
-    let lines = lines.map(|(a, b)| geo::Line::new(a, b));
-    let xy_map = gen_pixel_xy_map(&lines);
-    let mut angle_map = AngleMap::default();
-    for (x, y, z) in pixel_surface {
-        let z_info_list = xy_map.get(&(x, y)).unwrap();
-        let z_info_idx = z_info_list.binary_search_by_key(&z, |v| v.pixel).unwrap_or_else(|v| v);
-        let Some(z_info) = z_info_list.get(z_info_idx).or(z_info_list.last()) else {
-            continue;
-        };
-        let entry = angle_map.entry(z_info.angle).or_default();
-        entry.push(z_info.to_screen_line());
+const POINT_U:(f64, f64) = (-2., 0.);
+const POINT_V:(f64, f64) = (-1., -1.);
+const POINT_W:(f64, f64) = (1., -1.);
+const POINT_X:(f64, f64) = (1. - 0.5_f64.sqrt(), 1. + 0.5_f64.sqrt());
+const POINT_Y:(f64, f64) = (1. + 0.5_f64.sqrt(), 1. - 0.5_f64.sqrt());
+const POINT_Z:(f64, f64) = (-1., 3.0_f64.sqrt());
+const LINES:[((f64, f64), (f64, f64)); 3] = [(POINT_V, POINT_W), (POINT_X, POINT_Y), (POINT_Z, POINT_U)];
+pub struct Codec {
+    xy_map: PixelXYMap,
+}
+
+impl Codec {
+    pub fn new() -> Self {
+        let lines = LINES.map(|(a, b)| geo::Line::new(a, b));
+        let xy_map = gen_pixel_xy_map(&lines);
+        Self { xy_map }
     }
-    angle_map
+
+    pub fn encode(&self, pixel_surface: PixelSurface) -> AngleMap {
+        let mut angle_map: BTreeMap<u32, BTreeMap<ScreenLineAddr, ScreenLinePixels>> =
+            BTreeMap::new();
+        for (x, y, z) in pixel_surface {
+            let z_info_list = self.xy_map.get(&(x, y)).unwrap();
+            let z_info_idx = z_info_list
+                .binary_search_by_key(&z, |v| v.pixel)
+                .unwrap_or_else(|v| v);
+            let Some(z_info) = z_info_list.get(z_info_idx).or(z_info_list.last()) else {
+                continue;
+            };
+            let entry = angle_map.entry(z_info.angle).or_default();
+            let addr = ScreenLineAddr {
+                screen_idx: z_info.screen_pixel.idx,
+                addr: z_info.screen_pixel.addr,
+            };
+            let line_pixels = entry.entry(addr).or_default();
+            let pixel_idx = z_info.screen_pixel.pixel as usize;
+            if let Some(color) = line_pixels.pixels.get_mut(pixel_idx) {
+                *color = Some(1);
+            }
+        }
+        angle_map
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    v.into_iter().map(|(k, v)| ScreenLine {
+                        screen_idx: k.screen_idx,
+                        addr: k.addr,
+                        pixels: v.pixels,
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    pub fn decode(&self, angle_map: AngleMap) -> FloatSurface {
+        let mut float_surface = FloatSurface::default();
+        for (angle, LINES) in angle_map {
+            for ScreenLine {
+                screen_idx,
+                addr,
+                pixels,
+            } in LINES
+            {
+                for (idx, pixel) in pixels.into_iter().enumerate() {
+                    let Some(_pixel) = pixel else { continue };
+                }
+            }
+        }
+        float_surface
+    }
 }
 
 pub fn pixel_surface_to_float(pixel_surface: PixelSurface) -> FloatSurface {
-    vec![]
+    pixel_surface
+        .into_iter()
+        .map(|(pixel_x, pixel_y, pixel_z)| {
+            let x = pixel_to_v(pixel_x);
+            let y = pixel_to_v(pixel_y);
+            let z = pixel_to_h(pixel_z);
+            (x, y, z)
+        })
+        .collect()
 }
 
-pub fn decode(angle_map: AngleMap) -> FloatSurface {
-    vec![]
-}
-
-fn pixel_to_v(p: u32, total_pixels: usize) -> f64 {
-    let point_size: f64 = 2. * CIRCLE_R / total_pixels as f64;
+fn pixel_to_v(p: u32) -> f64 {
+    let point_size: f64 = 2. * CIRCLE_R / W_PIXELS as f64;
     p as f64 * point_size + 0.5 * point_size - CIRCLE_R
 }
 
-fn v_to_pixel(v: f64, total_pixels: usize) -> u32 {
-    let point_size: f64 = 2. * CIRCLE_R / total_pixels as f64;
+fn v_to_pixel(v: f64) -> u32 {
+    let point_size: f64 = 2. * CIRCLE_R / W_PIXELS as f64;
     ((v + CIRCLE_R) / point_size - 0.5) as u32
 }
 
-fn angle_to_v(p: u32, total_angles: usize) -> f64 {
-    p as f64 / total_angles as f64 * 2. * std::f64::consts::PI
+fn pixel_to_h(p: u32) -> f64 {
+    let point_size: f64 = CIRCLE_R / H_PIXELS as f64;
+    (p as f64) * point_size + 0.5 * point_size
 }
 
-fn cacl_height(lines: &[geo::Line], pixel_angle: u32, x: u32, y: u32) -> Option<PixelZInfo> {
-    let angle = angle_to_v(pixel_angle, TOTAL_ANGLES);
-    let x = pixel_to_v(x, W_PIXELS);
-    let y = pixel_to_v(y, W_PIXELS);
+fn h_to_pixel(h: f64, total_pixels: usize) -> u32 {
+    let point_size: f64 = CIRCLE_R / total_pixels as f64;
+    (h / point_size - 0.5) as u32
+}
 
-    const LEN: f64 = 4.;
+fn angle_to_v(p: u32) -> f64 {
+    p as f64 / TOTAL_ANGLES as f64 * 2. * std::f64::consts::PI
+}
+
+fn cacl_z_pixel(lines: &[geo::Line], pixel_angle: u32, x: u32, y: u32) -> Option<PixelZInfo> {
+    let angle = angle_to_v(pixel_angle);
+    let x = pixel_to_v(x);
+    let y = pixel_to_v(y);
+
+    const LEN: f64 = 4. * CIRCLE_R;
     let point_a = geo::Coord::from((LEN * angle.cos(), LEN * angle.sin()));
     let point_a1 = -point_a;
     let point_p = geo::Coord::from((x, y));
@@ -121,8 +191,10 @@ fn cacl_height(lines: &[geo::Line], pixel_angle: u32, x: u32, y: u32) -> Option<
     let line_pb = geo::Line::new(point_p, point_b);
     let mut intersection_info = None;
     for (idx, &line) in lines.iter().enumerate() {
-        if let Some(LineIntersection::SinglePoint { intersection: points, .. }) =
-            geo::line_intersection::line_intersection(line, line_pb)
+        if let Some(LineIntersection::SinglePoint {
+            intersection: points,
+            ..
+        }) = geo::line_intersection::line_intersection(line, line_pb)
         {
             intersection_info = Some((points, idx, line.start));
             break;
@@ -142,25 +214,59 @@ fn cacl_height(lines: &[geo::Line], pixel_angle: u32, x: u32, y: u32) -> Option<
         panic!("");
     };
     let len_qs = point_q.euclidean_distance(&point_s);
-    let h = 2. * CIRCLE_R - (CIRCLE_R + len_qs);
+    let h = CIRCLE_R * 2. - len_qs;
 
     let pq_len = geo::Line::new(point_p, point_q).euclidean_length();
     let pq = point_p - point_q;
     let sq = point_s - point_q;
-    let pixel_h = if pq.dot_product(sq).is_sign_negative() {
-        CIRCLE_R + pq_len
+    let screen_pixel_h = if pq.dot_product(sq).is_sign_negative() {
+        pq_len
     } else {
-        CIRCLE_R - pq_len
+        -pq_len
     };
 
-    let len_addr = point_start.euclidean_distance(&point_s);
+    let len_addr = point_start.euclidean_distance(&point_s) - CIRCLE_R;
     Some(PixelZInfo {
         angle: pixel_angle,
-        h,
-        screen_idx,
-        addr: v_to_pixel(len_addr, W_PIXELS),
-        pixel: v_to_pixel(pixel_h, H_PIXELS),
+        value: h,
+        pixel: h_to_pixel(h, H_PIXELS),
+        screen_pixel: ScreenPixel {
+            idx: screen_idx,
+            addr: v_to_pixel(len_addr),
+            pixel: v_to_pixel(screen_pixel_h),
+        },
     })
+}
+
+fn cacl_z(angle: u32, screen_idx: usize, addr: u32, pixel_idx: usize) -> f64 {
+    let angle = angle_to_v(angle);
+    const LEN: f64 = 4. * CIRCLE_R;
+    let point_a = geo::Coord::from((LEN * angle.cos(), LEN * angle.sin()));
+    let point_a1 = -point_a;
+    let point_c = geo::Coord::from((point_a.y, -point_a.x));
+    let point_c1 = geo::Coord::from((-point_a.y, point_a.x));
+    let line_c_c1 = geo::Line::new(point_c, point_c1);
+
+    let line = LINES[screen_idx];
+    let line = geo::Line::new(line.0, line.1);
+    let fraction = addr as f64 / W_PIXELS as f64;
+    let len_start_s = pixel_to_v(addr) + CIRCLE_R;
+    let fraction = len_start_s / (CIRCLE_R * 2.);
+    let point_s: geo::Coord<_> = line.line_interpolate_point(fraction).unwrap().into();
+    let point_s1 = point_s - point_a + point_a1;
+    let line_s_s1 = geo::Line::new(point_s, point_s1);
+    let point_q = geo::line_intersection::line_intersection(line_s_s1, line_c_c1).unwrap();
+    let LineIntersection::SinglePoint {
+        intersection: point_q,
+        ..
+    } = point_q
+        else {
+            panic!("");
+        };
+    // TODO
+    let point_p;
+    let h;
+    ;0.
 }
 
 #[cfg(test)]
