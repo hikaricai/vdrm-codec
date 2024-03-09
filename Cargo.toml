@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 geo = "0.28"
+plotters = "0.3"
+plotters-cairo = "0.5"
+gtk4 = "0.7"
+lazy_static = "1.4"

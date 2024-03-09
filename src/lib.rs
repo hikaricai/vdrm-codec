@@ -1,6 +1,20 @@
-use geo::{EuclideanDistance, EuclideanLength, LineInterpolatePoint, LineIntersection, Vector2DOps};
+use geo::{
+    EuclideanDistance, EuclideanLength, InteriorPoint, LineInterpolatePoint, LineIntersection,
+    Vector2DOps,
+};
 use std::collections::BTreeMap;
 
+lazy_static::lazy_static! {
+    static ref LINES:[((f64, f64), (f64, f64)); 3]  = {
+        let u:(f64, f64) = (-2., 0.);
+        let v:(f64, f64) = (-1., -1.);
+        let w:(f64, f64) = (1., -1.);
+        let x:(f64, f64) = (1. - 0.5_f64.sqrt(), 1. + 0.5_f64.sqrt());
+        let y:(f64, f64) = (1. + 0.5_f64.sqrt(), 1. - 0.5_f64.sqrt());
+        let z:(f64, f64) = (-1., 3.0_f64.sqrt());
+        [(v, w), (x, y), (z, u)]
+    };
+}
 const W_PIXELS: usize = 64;
 const H_PIXELS: usize = 32;
 const TOTAL_ANGLES: usize = 100;
@@ -10,6 +24,7 @@ const CIRCLE_R: f64 = 1.;
 type PixelColor = u32;
 type PixelXY = (u32, u32);
 
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 struct ScreenPixel {
     idx: usize,
     addr: u32,
@@ -31,19 +46,27 @@ struct ScreenLineAddr {
     screen_idx: usize,
     addr: u32,
 }
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 struct ScreenLinePixels {
     pixels: [Option<PixelColor>; W_PIXELS],
 }
 
+impl Default for ScreenLinePixels {
+    fn default() -> Self {
+        Self {
+            pixels: [None; W_PIXELS],
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
-struct ScreenLine {
+pub struct ScreenLine {
     screen_idx: usize,
     addr: u32,
     pixels: [Option<PixelColor>; W_PIXELS],
 }
 
-type AngleMap = BTreeMap<u32, Vec<ScreenLine>>;
+pub type AngleMap = BTreeMap<u32, Vec<ScreenLine>>;
 
 fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
     let mut xy_map = PixelXYMap::default();
@@ -60,21 +83,14 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
         }
     }
     for z_info in xy_map.values_mut() {
-        z_info.sort_by_key(|v| v.screen_pixel);
+        z_info.sort_by_key(|v| v.pixel);
     }
     xy_map
 }
 
-type PixelSurface = Vec<(u32, u32, u32)>;
-type FloatSurface = Vec<(f64, f64, f64)>;
+pub type PixelSurface = Vec<(u32, u32, u32)>;
+pub type FloatSurface = Vec<(f64, f64, f64)>;
 
-const POINT_U:(f64, f64) = (-2., 0.);
-const POINT_V:(f64, f64) = (-1., -1.);
-const POINT_W:(f64, f64) = (1., -1.);
-const POINT_X:(f64, f64) = (1. - 0.5_f64.sqrt(), 1. + 0.5_f64.sqrt());
-const POINT_Y:(f64, f64) = (1. + 0.5_f64.sqrt(), 1. - 0.5_f64.sqrt());
-const POINT_Z:(f64, f64) = (-1., 3.0_f64.sqrt());
-const LINES:[((f64, f64), (f64, f64)); 3] = [(POINT_V, POINT_W), (POINT_X, POINT_Y), (POINT_Z, POINT_U)];
 pub struct Codec {
     xy_map: PixelXYMap,
 }
@@ -86,17 +102,15 @@ impl Codec {
         Self { xy_map }
     }
 
-    pub fn encode(&self, pixel_surface: PixelSurface) -> AngleMap {
+    pub fn encode(&self, pixel_surface: &PixelSurface) -> AngleMap {
         let mut angle_map: BTreeMap<u32, BTreeMap<ScreenLineAddr, ScreenLinePixels>> =
             BTreeMap::new();
-        for (x, y, z) in pixel_surface {
+        for &(x, y, z) in pixel_surface {
             let z_info_list = self.xy_map.get(&(x, y)).unwrap();
             let z_info_idx = z_info_list
                 .binary_search_by_key(&z, |v| v.pixel)
                 .unwrap_or_else(|v| v);
-            let Some(z_info) = z_info_list.get(z_info_idx).or(z_info_list.last()) else {
-                continue;
-            };
+            let z_info = z_info_list.get(z_info_idx).or(z_info_list.last()).unwrap();
             let entry = angle_map.entry(z_info.angle).or_default();
             let addr = ScreenLineAddr {
                 screen_idx: z_info.screen_pixel.idx,
@@ -106,6 +120,8 @@ impl Codec {
             let pixel_idx = z_info.screen_pixel.pixel as usize;
             if let Some(color) = line_pixels.pixels.get_mut(pixel_idx) {
                 *color = Some(1);
+            } else {
+                panic!("{x}, {y}, {z}, pixel_idx {pixel_idx}");
             }
         }
         angle_map
@@ -113,11 +129,13 @@ impl Codec {
             .map(|(k, v)| {
                 (
                     k,
-                    v.into_iter().map(|(k, v)| ScreenLine {
-                        screen_idx: k.screen_idx,
-                        addr: k.addr,
-                        pixels: v.pixels,
-                    }),
+                    v.into_iter()
+                        .map(|(k, v)| ScreenLine {
+                            screen_idx: k.screen_idx,
+                            addr: k.addr,
+                            pixels: v.pixels,
+                        })
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect()
@@ -125,15 +143,17 @@ impl Codec {
 
     pub fn decode(&self, angle_map: AngleMap) -> FloatSurface {
         let mut float_surface = FloatSurface::default();
-        for (angle, LINES) in angle_map {
+        for (angle, lines) in angle_map {
             for ScreenLine {
                 screen_idx,
                 addr,
                 pixels,
-            } in LINES
+            } in lines
             {
                 for (idx, pixel) in pixels.into_iter().enumerate() {
                     let Some(_pixel) = pixel else { continue };
+                    let pixel_z = idx as u32;
+                    float_surface.push(cacl_xyz(angle, screen_idx, addr, pixel_z));
                 }
             }
         }
@@ -141,10 +161,10 @@ impl Codec {
     }
 }
 
-pub fn pixel_surface_to_float(pixel_surface: PixelSurface) -> FloatSurface {
+pub fn pixel_surface_to_float(pixel_surface: &PixelSurface) -> FloatSurface {
     pixel_surface
         .into_iter()
-        .map(|(pixel_x, pixel_y, pixel_z)| {
+        .map(|&(pixel_x, pixel_y, pixel_z)| {
             let x = pixel_to_v(pixel_x);
             let y = pixel_to_v(pixel_y);
             let z = pixel_to_h(pixel_z);
@@ -158,9 +178,13 @@ fn pixel_to_v(p: u32) -> f64 {
     p as f64 * point_size + 0.5 * point_size - CIRCLE_R
 }
 
-fn v_to_pixel(v: f64) -> u32 {
+fn v_to_pixel(v: f64) -> Option<u32> {
     let point_size: f64 = 2. * CIRCLE_R / W_PIXELS as f64;
-    ((v + CIRCLE_R) / point_size - 0.5) as u32
+    let v = (v + CIRCLE_R) / point_size - 0.5;
+    if v < 0. || v > 63. {
+        return None
+    }
+    Some(v as u32)
 }
 
 fn pixel_to_h(p: u32) -> f64 {
@@ -226,19 +250,21 @@ fn cacl_z_pixel(lines: &[geo::Line], pixel_angle: u32, x: u32, y: u32) -> Option
     };
 
     let len_addr = point_start.euclidean_distance(&point_s) - CIRCLE_R;
+    let addr = v_to_pixel(len_addr)?;
+    let pixel = v_to_pixel(screen_pixel_h)?;
     Some(PixelZInfo {
         angle: pixel_angle,
         value: h,
         pixel: h_to_pixel(h, H_PIXELS),
         screen_pixel: ScreenPixel {
             idx: screen_idx,
-            addr: v_to_pixel(len_addr),
-            pixel: v_to_pixel(screen_pixel_h),
+            addr,
+            pixel,
         },
     })
 }
 
-fn cacl_z(angle: u32, screen_idx: usize, addr: u32, pixel_idx: usize) -> f64 {
+fn cacl_xyz(angle: u32, screen_idx: usize, addr: u32, pixel_z: u32) -> (f64, f64, f64) {
     let angle = angle_to_v(angle);
     const LEN: f64 = 4. * CIRCLE_R;
     let point_a = geo::Coord::from((LEN * angle.cos(), LEN * angle.sin()));
@@ -249,24 +275,38 @@ fn cacl_z(angle: u32, screen_idx: usize, addr: u32, pixel_idx: usize) -> f64 {
 
     let line = LINES[screen_idx];
     let line = geo::Line::new(line.0, line.1);
-    let fraction = addr as f64 / W_PIXELS as f64;
     let len_start_s = pixel_to_v(addr) + CIRCLE_R;
     let fraction = len_start_s / (CIRCLE_R * 2.);
     let point_s: geo::Coord<_> = line.line_interpolate_point(fraction).unwrap().into();
     let point_s1 = point_s - point_a + point_a1;
-    let line_s_s1 = geo::Line::new(point_s, point_s1);
-    let point_q = geo::line_intersection::line_intersection(line_s_s1, line_c_c1).unwrap();
+    let point_s2 = point_s + point_a;
+    let line_s1_s2 = geo::Line::new(point_s1, point_s2);
+    let Some(point_q) = geo::line_intersection::line_intersection(line_s1_s2, line_c_c1) else {
+        panic!("line_s1_s2 {line_s1_s2:?} line_c_c1 {line_c_c1:?}");
+    };
     let LineIntersection::SinglePoint {
         intersection: point_q,
         ..
     } = point_q
-        else {
-            panic!("");
-        };
+    else {
+        panic!("");
+    };
     // TODO
-    let point_p;
-    let h;
-    ;0.
+    let len_pq_with_dir = pixel_to_v(pixel_z);
+    let len_pq_abs = len_pq_with_dir.abs();
+    let line_o_a1 = geo::Line::new(geo::Coord::zero(), point_a1);
+    let point_p1_abs: geo::Coord<_> = line_o_a1
+        .line_interpolate_point(len_pq_abs / LEN)
+        .unwrap()
+        .into();
+    let point_p = if len_pq_with_dir.is_sign_positive() {
+        point_q + point_p1_abs
+    } else {
+        point_q - point_p1_abs
+    };
+    let line_qs = geo::Line::new(point_q, point_s);
+    let z = CIRCLE_R * 2. - line_qs.euclidean_length();
+    (point_p.x, point_p.y, z)
 }
 
 #[cfg(test)]
