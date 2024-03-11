@@ -15,9 +15,9 @@ lazy_static::lazy_static! {
         [(v, w), (x, y), (z, u)]
     };
 }
-const W_PIXELS: usize = 64;
-const H_PIXELS: usize = 32;
-const TOTAL_ANGLES: usize = 100;
+pub const W_PIXELS: usize = 64;
+pub const H_PIXELS: usize = 32;
+pub const TOTAL_ANGLES: usize = 100;
 
 const CIRCLE_R: f64 = 1.;
 
@@ -61,9 +61,9 @@ impl Default for ScreenLinePixels {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ScreenLine {
-    screen_idx: usize,
-    addr: u32,
-    pixels: [Option<PixelColor>; W_PIXELS],
+    pub screen_idx: usize,
+    pub addr: u32,
+    pub pixels: [Option<PixelColor>; W_PIXELS],
 }
 
 pub type AngleMap = BTreeMap<u32, Vec<ScreenLine>>;
@@ -107,9 +107,31 @@ impl Codec {
             BTreeMap::new();
         for &(x, y, z) in pixel_surface {
             let z_info_list = self.xy_map.get(&(x, y)).unwrap();
-            let z_info_idx = z_info_list
-                .binary_search_by_key(&z, |v| v.pixel)
-                .unwrap_or_else(|v| v);
+            let z_info_idx = match z_info_list
+                .binary_search_by_key(&z, |v| v.pixel) {
+                Ok(idx) => {
+                    idx
+                }
+                Err(idx) => {
+                    if idx == 0 {
+                        idx
+                    } else if idx >= z_info_list.len() {
+                        idx - 1
+                    } else {
+                        let idx_l = idx - 1;
+                        let l = z_info_list.get(idx_l).unwrap();
+                        let r = z_info_list.get(idx).unwrap();
+                        // let deta_l = z - l.pixel;
+                        // let deta_r = r.pixel - z;
+                        // if deta_l < deta_r
+                        if z * 2 < l.pixel + r.pixel {
+                            idx_l
+                        } else {
+                            idx
+                        }
+                    }
+                }
+            };
             let z_info = z_info_list.get(z_info_idx).or(z_info_list.last()).unwrap();
             let entry = angle_map.entry(z_info.angle).or_default();
             let addr = ScreenLineAddr {
@@ -192,8 +214,8 @@ fn pixel_to_h(p: u32) -> f64 {
     (p as f64) * point_size + 0.5 * point_size
 }
 
-fn h_to_pixel(h: f64, total_pixels: usize) -> u32 {
-    let point_size: f64 = CIRCLE_R / total_pixels as f64;
+fn h_to_pixel(h: f64) -> u32 {
+    let point_size: f64 = CIRCLE_R / H_PIXELS as f64;
     (h / point_size - 0.5) as u32
 }
 
@@ -255,7 +277,7 @@ fn cacl_z_pixel(lines: &[geo::Line], pixel_angle: u32, x: u32, y: u32) -> Option
     Some(PixelZInfo {
         angle: pixel_angle,
         value: h,
-        pixel: h_to_pixel(h, H_PIXELS),
+        pixel: h_to_pixel(h),
         screen_pixel: ScreenPixel {
             idx: screen_idx,
             addr,

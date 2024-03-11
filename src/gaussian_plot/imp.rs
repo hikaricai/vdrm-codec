@@ -63,7 +63,7 @@ pub struct GaussianPlot {
     mean_y: Cell<f64>,
     #[property(get, set, minimum = 0.0, maximum = 10.0)]
     std_x: Cell<f64>,
-    #[property(get, set, minimum = 0, maximum = 31)]
+    #[property(get, set, minimum = 0, maximum = 63)]
     section_y: Cell<u32>,
 }
 
