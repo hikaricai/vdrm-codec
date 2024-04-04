@@ -1,6 +1,6 @@
 use gtk4::prelude::*;
 use std::collections::BTreeMap;
-use vdrm_codec::{ScreenLine, TOTAL_ANGLES, W_PIXELS};
+use vdrm_codec::{AngleMap, ScreenLine, TOTAL_ANGLES, W_PIXELS};
 
 mod gaussian_plot;
 mod window;
@@ -19,7 +19,6 @@ fn run_app() {
     application.run();
 }
 
-
 #[derive(Clone, Copy, Default)]
 #[repr(packed)]
 struct AngleInfo {
@@ -28,7 +27,7 @@ struct AngleInfo {
     lines: u16,
 }
 
-fn gen_hub75_data() {
+fn gen_angle_map() -> AngleMap {
     let mut pixel_surface = vdrm_codec::PixelSurface::new();
     for x in 0..64_u32 {
         for y in 0..64_u32 {
@@ -38,13 +37,43 @@ fn gen_hub75_data() {
     }
     let codec = vdrm_codec::Codec::new();
     let angle_map = codec.encode(&pixel_surface);
+    angle_map
+}
+
+fn mock_angle_map() -> AngleMap {
+    let mut angle_map = AngleMap::new();
+    for angle in 0..96 {
+        let screen_idx = angle / 32;
+        let addr_base = angle % 32;
+        let addr = addr_base * 2;
+        let mut screen_line1 = ScreenLine {
+            screen_idx,
+            addr: addr as u32,
+            pixels: [None; W_PIXELS],
+        };
+        screen_line1.pixels[addr] = Some(1);
+
+        let addr = addr_base * 2 + 1;
+        let mut screen_line2 = ScreenLine {
+            screen_idx,
+            addr: addr as u32,
+            pixels: [None; W_PIXELS],
+        };
+        screen_line2.pixels[addr] = Some(1);
+        angle_map.insert(angle as u32, vec![screen_line1, screen_line2]);
+    }
+    angle_map
+}
+
+fn gen_hub75_data(angle_map: AngleMap) {
     let mut pixel_buf: Vec<u8> = vec![];
     let mut addr_buf: Vec<u8> = vec![];
     let mut angle_infos = vec![AngleInfo::default(); TOTAL_ANGLES];
     assert_eq!(std::mem::size_of::<AngleInfo>(), 6);
     const ADDR_MAX: u32 = W_PIXELS as u32 / 2;
     const ADDR_BITS: u32 = ADDR_MAX.ilog2();
-    const TOTAL_ADDR_BITS: u32 = ADDR_BITS + 2;
+    const REAL_ADDR_BITS: u32 = ADDR_BITS + 3;
+    const TOTAL_ADDR_BITS: u32 = ADDR_BITS + REAL_ADDR_BITS;
 
     for (angle, lines) in angle_map {
         let mut addr_map = BTreeMap::<u32, [u8; W_PIXELS]>::new();
@@ -54,24 +83,27 @@ fn gen_hub75_data() {
             pixels,
         } in lines
         {
-            let screen_addr = (screen_idx as u32) << ADDR_BITS;
-            let real_addr = screen_addr | (addr % ADDR_MAX);
-            let color_bits: u8 = if addr >= ADDR_MAX { 0b111 << 3 } else { 0b111 };
+            let screen_addr = (!(1 << screen_idx) & 0b111) << ADDR_BITS;
+            // hub75 delay on addr
+            let half_addr = addr % ADDR_MAX;
+            let real_addr = screen_addr | half_addr;
+            let color_bits: u8 = if addr < ADDR_MAX { 0b111 } else { 0b111 << 3 };
             let pixels_entry = addr_map.entry(real_addr).or_insert([0; W_PIXELS]);
-            for (pixel, color) in pixels_entry.iter_mut().zip(pixels) {
+            for (pixel, color) in pixels_entry.iter_mut().zip(pixels.into_iter().rev()) {
                 *pixel = *pixel | color.map(|_c| color_bits).unwrap_or_default();
             }
         }
         let pixel_buf_idx = pixel_buf.len() as u16;
         let addr_buf_idx = addr_buf.len() as u16;
         let lines = addr_map.len() as u16;
-        angle_infos[angle as usize] = AngleInfo{
+        angle_infos[angle as usize] = AngleInfo {
             pixel_buf_idx,
             addr_buf_idx,
             lines,
         };
-        for (addr, pixels) in addr_map {
-            let delay_addr = (256_u32 << TOTAL_ADDR_BITS) | addr;
+        for (real_addr, pixels) in addr_map {
+            let addr = real_addr & 0b11111;
+            let delay_addr = (256_u32 << TOTAL_ADDR_BITS) |  real_addr << ADDR_BITS | addr;
             pixel_buf.extend(pixels);
             addr_buf.extend(delay_addr.to_le_bytes());
         }
@@ -87,5 +119,6 @@ fn gen_hub75_data() {
     std::fs::write("hub75_bufs/addr_buf.bin", addr_buf).unwrap();
 }
 fn main() {
-    gen_hub75_data();
+    let angle_map = mock_angle_map();
+    gen_hub75_data(angle_map);
 }
