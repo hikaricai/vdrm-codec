@@ -10,6 +10,8 @@ use std::sync::Mutex;
 
 use plotters::prelude::*;
 use plotters_cairo::CairoBackend;
+use vdrm_codec::AngleMap;
+
 const AXES_LEN: f64 = 2.;
 
 // lazy_static::lazy_static!{
@@ -19,32 +21,50 @@ const AXES_LEN: f64 = 2.;
 //     };
 // }
 
-struct Surfaces {
+#[derive(Copy, Clone, Eq, PartialEq)]
+struct Params {
     section_y: u32,
+    pixel_offset: i32,
+    angle_offset: i32,
+}
+
+struct Surfaces {
+    params: Params,
     real: vdrm_codec::FloatSurface,
     emu: vdrm_codec::FloatSurface,
 }
 static FLOAT_SURFACES: Mutex<Option<Surfaces>> = Mutex::new(None);
 
-
-fn gen_float_surface(section_y: u32) -> Surfaces {
-    let mut pixel_surface = vdrm_codec::PixelSurface::new();
-    for x in 0..64_u32 {
-        for y in 0..64_u32 {
-            // let z = ((x as f64 + y as f64).cos() + 1.) / 2.;
-            // let z = z * 32.;
-            // let z = z as u32;
-            // let z = std::cmp::min(z, 31);
-            let z = section_y;
-            pixel_surface.push((x, y, z));
-        }
-    }
-    let real_float_surface = vdrm_codec::pixel_surface_to_float(&pixel_surface).into_iter().map(|(x, y, z)|(x, z, y)).collect();
+fn gen_float_surface(params: Params) -> Surfaces {
+    let pixel_surface = vdrm_codec::gen_pyramid_surface();
+    let real_float_surface = vdrm_codec::pixel_surface_to_float(&pixel_surface)
+        .into_iter()
+        .map(|(x, y, z)| (x, z, y))
+        .collect();
     let codec = vdrm_codec::Codec::new();
-    let angle_map = codec.encode(&pixel_surface);
-    let float_surface = codec.decode(angle_map).into_iter().map(|(x, y, z)|(x, z, y)).collect();
-    Surfaces{
-        section_y,
+    let mut angle_map = codec.encode(&pixel_surface, params.pixel_offset);
+    if params.angle_offset != 0 {
+        angle_map = angle_map
+            .into_iter()
+            .map(|(mut k, v)| {
+                if params.angle_offset > 0 {
+                    k += params.angle_offset as u32;
+                } else {
+                    k += (100 + params.angle_offset) as u32;
+                }
+                k %= 100;
+                (k, v)
+            })
+            .collect();
+    }
+
+    let float_surface = codec
+        .decode(angle_map)
+        .into_iter()
+        .map(|(x, y, z)| (x, z, y))
+        .collect();
+    Surfaces {
+        params,
         real: real_float_surface,
         emu: float_surface,
     }
@@ -59,10 +79,10 @@ pub struct GaussianPlot {
     yaw: Cell<f64>,
     #[property(get, set, minimum = -10.0, maximum = 10.0)]
     mean_x: Cell<f64>,
-    #[property(get, set, minimum = -10.0, maximum = 10.0)]
-    mean_y: Cell<f64>,
-    #[property(get, set, minimum = 0.0, maximum = 10.0)]
-    std_x: Cell<f64>,
+    #[property(get, set, minimum = -50, maximum = 50)]
+    mean_y: Cell<i32>,
+    #[property(get, set, minimum = -32, maximum = 32)]
+    std_x: Cell<i32>,
     #[property(get, set, minimum = 0, maximum = 63)]
     section_y: Cell<u32>,
 }
@@ -105,15 +125,6 @@ impl WidgetImpl for GaussianPlot {
 }
 
 impl GaussianPlot {
-    fn gaussian_pdf(&self, x: f64, y: f64) -> f64 {
-        let x_diff = (x - self.mean_x.get()) / self.std_x.get();
-        let y_diff = x_diff;
-        let exponent = -(x_diff * x_diff + y_diff * y_diff) / 2.0;
-        let denom = (2.0 * std::f64::consts::PI / self.std_x.get() / self.std_x.get()).sqrt();
-        let gaussian_pdf = 1.0 / denom;
-        gaussian_pdf * exponent.exp()
-    }
-
     fn plot_pdf<'a, DB: DrawingBackend + 'a>(
         &self,
         backend: DB,
@@ -122,8 +133,11 @@ impl GaussianPlot {
 
         root.fill(&WHITE)?;
 
-        let mut chart =
-            ChartBuilder::on(&root).build_cartesian_3d(-AXES_LEN..AXES_LEN, -AXES_LEN..AXES_LEN, -AXES_LEN..AXES_LEN)?;
+        let mut chart = ChartBuilder::on(&root).build_cartesian_3d(
+            -AXES_LEN..AXES_LEN,
+            -AXES_LEN..AXES_LEN,
+            -AXES_LEN..AXES_LEN,
+        )?;
 
         chart.with_projection(|mut p| {
             p.pitch = self.pitch.get();
@@ -151,9 +165,16 @@ impl GaussianPlot {
             .unwrap();
 
         let section_y = self.section_y.get();
+        let pixel_offset = self.std_x.get();
+        let angle_offset = self.mean_y.get();
+        let params = Params {
+            section_y,
+            pixel_offset,
+            angle_offset,
+        };
         let mut guard = FLOAT_SURFACES.lock().unwrap();
-        if guard.as_mut().map(|v|v.section_y) != Some(section_y) {
-            let surfaces = gen_float_surface(section_y);
+        if guard.as_mut().map(|v| v.params) != Some(params) {
+            let surfaces = gen_float_surface(params);
             guard.replace(surfaces);
         }
         let surfaces = guard.as_ref().unwrap();

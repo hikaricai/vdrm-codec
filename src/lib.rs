@@ -91,6 +91,31 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
 pub type PixelSurface = Vec<(u32, u32, u32)>;
 pub type FloatSurface = Vec<(f64, f64, f64)>;
 
+pub fn gen_pyramid_surface() -> PixelSurface {
+    let mut pixel_surface = PixelSurface::new();
+    for x in 0..64_u32 {
+        for y in 0..64_u32 {
+            let x_i32 = x as i32 - 32;
+            let y_i32 = y as i32 - 32;
+            let h = 32 - (x_i32.abs() + y_i32.abs());
+            let z = h.abs() as u32;
+            pixel_surface.push((x, y, z));
+        }
+    }
+    pixel_surface
+}
+
+pub fn gen_plane_surface(height: u32) -> PixelSurface {
+    let mut pixel_surface = PixelSurface::new();
+    for x in 0..64_u32 {
+        for y in 0..64_u32 {
+            let z = height;
+            pixel_surface.push((x, y, z));
+        }
+    }
+    pixel_surface
+}
+
 pub struct Codec {
     xy_map: PixelXYMap,
 }
@@ -102,16 +127,13 @@ impl Codec {
         Self { xy_map }
     }
 
-    pub fn encode(&self, pixel_surface: &PixelSurface) -> AngleMap {
+    pub fn encode(&self, pixel_surface: &PixelSurface, pixel_offset: i32) -> AngleMap {
         let mut angle_map: BTreeMap<u32, BTreeMap<ScreenLineAddr, ScreenLinePixels>> =
             BTreeMap::new();
         for &(x, y, z) in pixel_surface {
             let z_info_list = self.xy_map.get(&(x, y)).unwrap();
-            let z_info_idx = match z_info_list
-                .binary_search_by_key(&z, |v| v.pixel) {
-                Ok(idx) => {
-                    idx
-                }
+            let z_info_idx = match z_info_list.binary_search_by_key(&z, |v| v.pixel) {
+                Ok(idx) => idx,
                 Err(idx) => {
                     if idx == 0 {
                         idx
@@ -152,10 +174,25 @@ impl Codec {
                 (
                     k,
                     v.into_iter()
-                        .map(|(k, v)| ScreenLine {
-                            screen_idx: k.screen_idx,
-                            addr: k.addr,
-                            pixels: v.pixels,
+                        .map(|(k, mut v)| {
+                            if pixel_offset > 0 {
+                                let offset = pixel_offset as usize;
+                                v.pixels.rotate_right(offset);
+                                v.pixels.iter_mut().take(offset).for_each(|v| {
+                                    v.take();
+                                });
+                            } else if pixel_offset < 0 {
+                                let offset = (-pixel_offset) as usize;
+                                v.pixels.rotate_left(offset);
+                                v.pixels.iter_mut().rev().take(offset).for_each(|v| {
+                                    v.take();
+                                });
+                            }
+                            ScreenLine {
+                                screen_idx: k.screen_idx,
+                                addr: k.addr,
+                                pixels: v.pixels,
+                            }
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -204,7 +241,7 @@ fn v_to_pixel(v: f64) -> Option<u32> {
     let point_size: f64 = 2. * CIRCLE_R / W_PIXELS as f64;
     let v = (v + CIRCLE_R) / point_size - 0.5;
     if v < 0. || v > 63. {
-        return None
+        return None;
     }
     Some(v as u32)
 }

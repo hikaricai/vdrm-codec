@@ -27,16 +27,17 @@ struct AngleInfo {
     lines: u16,
 }
 
-fn gen_angle_map() -> AngleMap {
-    let mut pixel_surface = vdrm_codec::PixelSurface::new();
-    for x in 0..64_u32 {
-        for y in 0..64_u32 {
-            let z = 16;
-            pixel_surface.push((x, y, z));
-        }
-    }
+fn gen_pyramid_angle_map(pixel_offset: i32, _height: u32) -> AngleMap {
+    let pixel_surface = vdrm_codec::gen_pyramid_surface();
     let codec = vdrm_codec::Codec::new();
-    let angle_map = codec.encode(&pixel_surface);
+    let angle_map = codec.encode(&pixel_surface, pixel_offset);
+    angle_map
+}
+
+fn gen_plane_angle_map(pixel_offset: i32, height: u32) -> AngleMap {
+    let pixel_surface = vdrm_codec::gen_plane_surface(height);
+    let codec = vdrm_codec::Codec::new();
+    let angle_map = codec.encode(&pixel_surface, pixel_offset);
     angle_map
 }
 
@@ -103,7 +104,7 @@ fn gen_hub75_data(angle_map: AngleMap) {
         };
         for (real_addr, pixels) in addr_map {
             let addr = real_addr & 0b11111;
-            let delay_addr = (256_u32 << TOTAL_ADDR_BITS) |  real_addr << ADDR_BITS | addr;
+            let delay_addr = (256_u32 << TOTAL_ADDR_BITS) | real_addr << ADDR_BITS | addr;
             pixel_buf.extend(pixels);
             addr_buf.extend(delay_addr.to_le_bytes());
         }
@@ -119,6 +120,25 @@ fn gen_hub75_data(angle_map: AngleMap) {
     std::fs::write("hub75_bufs/addr_buf.bin", addr_buf).unwrap();
 }
 fn main() {
-    let angle_map = mock_angle_map();
+    // let angle_map = mock_angle_map();
+    let pixel_offset: i32 = std::env::args()
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_default();
+    let height: u32 = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    let is_plane: bool = std::env::args()
+        .nth(3)
+        .map(|v| v == "p")
+        .unwrap_or(false);
+    println!("pixel_offset {pixel_offset} height {height} is_plane {is_plane}");
+    let angle_map = if is_plane {
+        gen_plane_angle_map(pixel_offset, height)
+    } else {
+        gen_pyramid_angle_map(pixel_offset, height)
+    };
     gen_hub75_data(angle_map);
+    run_app();
 }
