@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use plotters::prelude::*;
 use plotters_cairo::CairoBackend;
-use vdrm_codec::AngleMap;
+use vdrm_codec::{AngleMap, TOTAL_ANGLES};
 
 const AXES_LEN: f64 = 2.;
 
@@ -36,7 +36,7 @@ struct Surfaces {
 static FLOAT_SURFACES: Mutex<Option<Surfaces>> = Mutex::new(None);
 
 fn gen_float_surface(params: Params) -> Surfaces {
-    let pixel_surface = vdrm_codec::gen_pyramid_surface();
+    let pixel_surface = vdrm_codec::gen_cross_plane_surface();
     let real_float_surface = vdrm_codec::pixel_surface_to_float(&pixel_surface)
         .into_iter()
         .map(|(x, y, z)| (x, z, y))
@@ -50,9 +50,9 @@ fn gen_float_surface(params: Params) -> Surfaces {
                 if params.angle_offset > 0 {
                     k += params.angle_offset as u32;
                 } else {
-                    k += (100 + params.angle_offset) as u32;
+                    k += (TOTAL_ANGLES as i32 + params.angle_offset) as u32;
                 }
-                k %= 100;
+                k %= TOTAL_ANGLES as u32;
                 (k, v)
             })
             .collect();

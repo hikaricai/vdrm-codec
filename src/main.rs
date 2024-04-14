@@ -41,6 +41,13 @@ fn gen_plane_angle_map(pixel_offset: i32, height: u32) -> AngleMap {
     angle_map
 }
 
+fn gen_cross_plane_angle_map(pixel_offset: i32, height: u32) -> AngleMap {
+    let pixel_surface = vdrm_codec::gen_cross_plane_surface();
+    let codec = vdrm_codec::Codec::new();
+    let angle_map = codec.encode(&pixel_surface, pixel_offset);
+    angle_map
+}
+
 fn mock_angle_map() -> AngleMap {
     let mut angle_map = AngleMap::new();
     for angle in 0..96 {
@@ -66,6 +73,41 @@ fn mock_angle_map() -> AngleMap {
     angle_map
 }
 
+fn mock_angle_map2() -> AngleMap {
+    let plane0: Vec<_> = (0..W_PIXELS)
+        .filter(|addr| (*addr / 8) % 2 == 0)
+        .map(|addr| ScreenLine {
+            screen_idx: 0,
+            addr: addr as u32,
+            pixels: [Some(1); W_PIXELS],
+        })
+        .collect();
+
+    let plane1: Vec<_> = (0..W_PIXELS)
+        .filter(|addr| (*addr / 8) % 2 == 0)
+        .map(|addr| ScreenLine {
+            screen_idx: 1,
+            addr: addr as u32,
+            pixels: [Some(0b10); W_PIXELS],
+        })
+        .collect();
+
+    let plane2: Vec<_> = (0..W_PIXELS)
+        .filter(|addr| (*addr / 8) % 2 != 0)
+        .map(|addr| ScreenLine {
+            screen_idx: 2,
+            addr: addr as u32,
+            pixels: [Some(0b101); W_PIXELS],
+        })
+        .collect();
+
+    AngleMap::from([
+        (TOTAL_ANGLES as u32 * 3 / 4, plane0),
+        (TOTAL_ANGLES as u32 / 8, plane1),
+        (TOTAL_ANGLES as u32 * 11 / 24, plane2),
+    ])
+}
+
 fn gen_hub75_data(angle_map: AngleMap) {
     let mut pixel_buf: Vec<u8> = vec![];
     let mut addr_buf: Vec<u8> = vec![];
@@ -88,10 +130,17 @@ fn gen_hub75_data(angle_map: AngleMap) {
             // hub75 delay on addr
             let half_addr = addr % ADDR_MAX;
             let real_addr = screen_addr | half_addr;
-            let color_bits: u8 = if addr < ADDR_MAX { 0b111 } else { 0b111 << 3 };
+
             let pixels_entry = addr_map.entry(real_addr).or_insert([0; W_PIXELS]);
             for (pixel, color) in pixels_entry.iter_mut().zip(pixels.into_iter().rev()) {
-                *pixel = *pixel | color.map(|_c| color_bits).unwrap_or_default();
+                *pixel = *pixel
+                    | color
+                        .map(|c| {
+                            let color = c & 0b111;
+                            let color_bits = if addr < ADDR_MAX { color } else { color << 3 };
+                            color_bits as u8
+                        })
+                        .unwrap_or_default();
             }
         }
         let pixel_buf_idx = pixel_buf.len() as u16;
@@ -129,16 +178,16 @@ fn main() {
         .nth(2)
         .and_then(|v| v.parse().ok())
         .unwrap_or(32);
-    let is_plane: bool = std::env::args()
-        .nth(3)
-        .map(|v| v == "p")
-        .unwrap_or(false);
-    println!("pixel_offset {pixel_offset} height {height} is_plane {is_plane}");
-    let angle_map = if is_plane {
-        gen_plane_angle_map(pixel_offset, height)
-    } else {
-        gen_pyramid_angle_map(pixel_offset, height)
+    let t = std::env::args().nth(3).unwrap_or_default();
+    println!("pixel_offset {pixel_offset} height {height} type {t}");
+    let angle_map = match t.as_str() {
+        "cross" => gen_cross_plane_angle_map(pixel_offset, height),
+        "plane" => gen_plane_angle_map(pixel_offset, height),
+        "mock" => mock_angle_map(),
+        "mock2" => mock_angle_map2(),
+        "pyramid" => gen_pyramid_angle_map(pixel_offset, height),
+        _ => gen_plane_angle_map(pixel_offset, height),
     };
     gen_hub75_data(angle_map);
-    run_app();
+    // run_app();
 }

@@ -9,15 +9,15 @@ lazy_static::lazy_static! {
         let u:(f64, f64) = (-2., 0.);
         let v:(f64, f64) = (-1., -1.);
         let w:(f64, f64) = (1., -1.);
-        let x:(f64, f64) = (1. - 0.5_f64.sqrt(), 1. + 0.5_f64.sqrt());
-        let y:(f64, f64) = (1. + 0.5_f64.sqrt(), 1. - 0.5_f64.sqrt());
+        let x:(f64, f64) = (1. + 0.5_f64.sqrt(), 1. - 0.5_f64.sqrt());
+        let y:(f64, f64) = (1. - 0.5_f64.sqrt(), 1. + 0.5_f64.sqrt());
         let z:(f64, f64) = (-1., 3.0_f64.sqrt());
         [(v, w), (x, y), (z, u)]
     };
 }
 pub const W_PIXELS: usize = 64;
 pub const H_PIXELS: usize = 32;
-pub const TOTAL_ANGLES: usize = 100;
+pub const TOTAL_ANGLES: usize = 360;
 
 const CIRCLE_R: f64 = 1.;
 
@@ -88,7 +88,7 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
     xy_map
 }
 
-pub type PixelSurface = Vec<(u32, u32, u32)>;
+pub type PixelSurface = Vec<(u32, u32, (u32, PixelColor))>;
 pub type FloatSurface = Vec<(f64, f64, f64)>;
 
 pub fn gen_pyramid_surface() -> PixelSurface {
@@ -98,8 +98,20 @@ pub fn gen_pyramid_surface() -> PixelSurface {
             let x_i32 = x as i32 - 32;
             let y_i32 = y as i32 - 32;
             let h = 32 - (x_i32.abs() + y_i32.abs());
+            if h < 0 {
+                continue;
+            }
             let z = h.abs() as u32;
-            pixel_surface.push((x, y, z));
+            let color = match (x_i32 >= 0, y_i32 >=0 ) {
+                (true, true) => 0b111,
+                (false, true) => 0b001,
+                (false, false) => 0b010,
+                (true, false) => 0b101,
+            };
+            if color != 0b111 && color != 0b001 {
+                continue;
+            }
+            pixel_surface.push((x, y, (z, color)));
         }
     }
     pixel_surface
@@ -110,6 +122,22 @@ pub fn gen_plane_surface(height: u32) -> PixelSurface {
     for x in 0..64_u32 {
         for y in 0..64_u32 {
             let z = height;
+            pixel_surface.push((x, y, (z, 0b111)));
+        }
+    }
+    pixel_surface
+}
+
+pub fn gen_cross_plane_surface() -> PixelSurface {
+    let mut pixel_surface = PixelSurface::new();
+    for x in 0..64_u32 {
+        for y in 0..64_u32 {
+            let idx = (x / 8) % 3;
+            let z = match idx {
+                0 => (32, 0b1),
+                1 => (16, 0b10),
+                _ => (0, 0b101),
+            };
             pixel_surface.push((x, y, z));
         }
     }
@@ -130,7 +158,7 @@ impl Codec {
     pub fn encode(&self, pixel_surface: &PixelSurface, pixel_offset: i32) -> AngleMap {
         let mut angle_map: BTreeMap<u32, BTreeMap<ScreenLineAddr, ScreenLinePixels>> =
             BTreeMap::new();
-        for &(x, y, z) in pixel_surface {
+        for &(x, y, (z, color)) in pixel_surface {
             let z_info_list = self.xy_map.get(&(x, y)).unwrap();
             let z_info_idx = match z_info_list.binary_search_by_key(&z, |v| v.pixel) {
                 Ok(idx) => idx,
@@ -162,8 +190,8 @@ impl Codec {
             };
             let line_pixels = entry.entry(addr).or_default();
             let pixel_idx = z_info.screen_pixel.pixel as usize;
-            if let Some(color) = line_pixels.pixels.get_mut(pixel_idx) {
-                *color = Some(1);
+            if let Some(c) = line_pixels.pixels.get_mut(pixel_idx) {
+                *c = Some(color);
             } else {
                 panic!("{x}, {y}, {z}, pixel_idx {pixel_idx}");
             }
@@ -223,7 +251,7 @@ impl Codec {
 pub fn pixel_surface_to_float(pixel_surface: &PixelSurface) -> FloatSurface {
     pixel_surface
         .into_iter()
-        .map(|&(pixel_x, pixel_y, pixel_z)| {
+        .map(|&(pixel_x, pixel_y, (pixel_z, _color))| {
             let x = pixel_to_v(pixel_x);
             let y = pixel_to_v(pixel_y);
             let z = pixel_to_h(pixel_z);
