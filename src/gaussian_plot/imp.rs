@@ -36,7 +36,7 @@ struct Surfaces {
 static FLOAT_SURFACES: Mutex<Option<Surfaces>> = Mutex::new(None);
 
 fn gen_float_surface(params: Params) -> Surfaces {
-    let pixel_surface = vdrm_codec::gen_cross_plane_surface();
+    let pixel_surface = vdrm_codec::gen_pyramid_surface2();
     let real_float_surface = vdrm_codec::pixel_surface_to_float(&pixel_surface)
         .into_iter()
         .map(|(x, y, z)| (x, z, y))

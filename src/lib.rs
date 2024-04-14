@@ -98,7 +98,7 @@ pub fn gen_pyramid_surface() -> PixelSurface {
             let x_i32 = x as i32 - 32;
             let y_i32 = y as i32 - 32;
             let h = 32 - (x_i32.abs() + y_i32.abs());
-            if h < 0 {
+            if h < 8 {
                 continue;
             }
             let z = h.abs() as u32;
@@ -108,7 +108,33 @@ pub fn gen_pyramid_surface() -> PixelSurface {
                 (false, false) => 0b010,
                 (true, false) => 0b101,
             };
-            if color != 0b111 && color != 0b001 {
+            // if color != 0b111 {
+            //     continue;
+            // }
+            pixel_surface.push((x, y, (z, color)));
+        }
+    }
+    pixel_surface
+}
+
+pub fn gen_pyramid_surface2() -> PixelSurface {
+    let mut pixel_surface = PixelSurface::new();
+    for x in 0..64_u32 {
+        for y in 0..64_u32 {
+            let x_i32 = x as i32 - 32;
+            let y_i32 = y as i32 - 32;
+            let h = 32 - (x_i32.abs() + y_i32.abs());
+            if h < 0 {
+                // continue;
+            }
+            let z = h.abs() as u32;
+            let color = match (x_i32 >= 0, y_i32 >=0 ) {
+                (true, true) => 0b111,
+                (false, true) => 0b001,
+                (false, false) => 0b010,
+                (true, false) => 0b101,
+            };
+            if color != 0b111 && color != 0b001{
                 continue;
             }
             pixel_surface.push((x, y, (z, color)));
@@ -401,5 +427,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {}
+    fn it_works() {
+        let codec = Codec::new();
+        let angle_map1 = codec.encode(&gen_pyramid_surface(), 5);
+        let angle_map2 = codec.encode(&gen_pyramid_surface2(), 5);
+        for (a, b) in angle_map1.into_iter().zip(angle_map2) {
+            println!("angle {} {} {}", a.0, a.1.len(), b.1.len());
+        }
+    }
 }
