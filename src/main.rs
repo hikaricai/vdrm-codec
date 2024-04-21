@@ -27,8 +27,8 @@ struct AngleInfo {
     lines: u16,
 }
 
-fn gen_pyramid_angle_map(pixel_offset: i32, _height: u32) -> AngleMap {
-    let pixel_surface = vdrm_codec::gen_pyramid_surface();
+fn gen_pyramid_angle_map(pixel_offset: i32, height: u32) -> AngleMap {
+    let pixel_surface = vdrm_codec::gen_pyramid_surface(0, height as i32);
     let codec = vdrm_codec::Codec::new();
     let angle_map = codec.encode(&pixel_surface, pixel_offset);
     angle_map
@@ -173,7 +173,7 @@ fn main() {
     let pixel_offset: i32 = std::env::args()
         .nth(1)
         .and_then(|v| v.parse().ok())
-        .unwrap_or_default();
+        .unwrap_or(5);
     let height: u32 = std::env::args()
         .nth(2)
         .and_then(|v| v.parse().ok())

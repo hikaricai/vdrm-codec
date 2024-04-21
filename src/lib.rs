@@ -59,7 +59,7 @@ impl Default for ScreenLinePixels {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ScreenLine {
     pub screen_idx: usize,
     pub addr: u32,
@@ -91,18 +91,18 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
 pub type PixelSurface = Vec<(u32, u32, (u32, PixelColor))>;
 pub type FloatSurface = Vec<(f64, f64, f64)>;
 
-pub fn gen_pyramid_surface() -> PixelSurface {
+pub fn gen_pyramid_surface(low:i32, height: i32) -> PixelSurface {
     let mut pixel_surface = PixelSurface::new();
     for x in 0..64_u32 {
         for y in 0..64_u32 {
             let x_i32 = x as i32 - 32;
             let y_i32 = y as i32 - 32;
             let h = 32 - (x_i32.abs() + y_i32.abs());
-            if h < 8 {
+            if h < low || h > height {
                 continue;
             }
             let z = h.abs() as u32;
-            let color = match (x_i32 >= 0, y_i32 >=0 ) {
+            let color = match (x_i32 >= 0, y_i32 >= 0) {
                 (true, true) => 0b111,
                 (false, true) => 0b001,
                 (false, false) => 0b010,
@@ -128,13 +128,13 @@ pub fn gen_pyramid_surface2() -> PixelSurface {
                 // continue;
             }
             let z = h.abs() as u32;
-            let color = match (x_i32 >= 0, y_i32 >=0 ) {
+            let color = match (x_i32 >= 0, y_i32 >= 0) {
                 (true, true) => 0b111,
                 (false, true) => 0b001,
                 (false, false) => 0b010,
                 (true, false) => 0b101,
             };
-            if color != 0b111 && color != 0b001{
+            if color != 0b111 && color != 0b001 {
                 continue;
             }
             pixel_surface.push((x, y, (z, color)));
@@ -425,14 +425,49 @@ fn cacl_xyz(angle: u32, screen_idx: usize, addr: u32, pixel_z: u32) -> (f64, f64
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use std::fmt::Write;
+    fn print_screen_lines(lines: &[ScreenLine]) {
+        let mut buf = "[".to_string();
+        for line in lines {
+            let mut pixels = "(".to_string();
+            for p in line.pixels {
+                match p {
+                    None => {write!(&mut pixels, "_").unwrap();}
+                    Some(c) => {write!(&mut pixels, "{c}").unwrap();}
+                }
+                pixels.push(',');
+            }
+            buf.push_str(&format!("{}-{}{}",line.screen_idx, line.addr, pixels));
+        }
+        buf.push(']');
+        println!("{buf}");
+    }
     #[test]
     fn it_works() {
-        let codec = Codec::new();
-        let angle_map1 = codec.encode(&gen_pyramid_surface(), 5);
-        let angle_map2 = codec.encode(&gen_pyramid_surface2(), 5);
-        for (a, b) in angle_map1.into_iter().zip(angle_map2) {
-            println!("angle {} {} {}", a.0, a.1.len(), b.1.len());
+        let angle_map1 = Codec::new().encode(&gen_pyramid_surface(0, 30), 0);
+        let angle_map2 = Codec::new().encode(&gen_pyramid_surface(0, 32), 0);
+        let empty = vec![];
+        for angle in 0..TOTAL_ANGLES as u32 {
+            let a = angle_map1.get(&angle).unwrap_or(&empty);
+            let b = angle_map2.get(&angle).unwrap_or(&empty);
+            // println!("angle {} {} {}", a.0, a.1.len(), b.1.len());
+            if a == b {
+                continue;
+            }
+            // if a.1 == b.1 {
+            //     continue;
+            // }
+            // for screen_line in b.1.iter() {
+            //     if screen_line.screen_idx != 0 {
+            //         continue;
+            //     }
+            //     if screen_line.addr > 24 && screen_line.addr < 40 {
+            //         println!("{:?}", screen_line.pixels);
+            //     }
+            // }
+            println!("diff on angle {}", angle);
+            print_screen_lines(a.as_slice());
+            print_screen_lines(b.as_slice());
         }
     }
 }
