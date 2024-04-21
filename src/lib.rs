@@ -465,7 +465,7 @@ mod tests {
             //         println!("{:?}", screen_line.pixels);
             //     }
             // }
-            println!("diff on angle {}", angle);
+            // println!("diff on angle {}", angle);
             print_screen_lines(a.as_slice());
             print_screen_lines(b.as_slice());
         }
