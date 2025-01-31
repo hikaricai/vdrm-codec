@@ -89,15 +89,65 @@ fn gen_pixel_xy_map(lines: &[geo::Line]) -> PixelXYMap {
 }
 
 pub type PixelSurface = Vec<(u32, u32, (u32, PixelColor))>;
+pub type MultiPixelSurface = Vec<(u32, u32, (Vec<u32>, PixelColor))>;
 pub type FloatSurface = Vec<(f64, f64, f64)>;
+fn new_axis_line(p1: (u32, u32), p2: (u32, u32)) -> Vec<(u32, u32)> {
+    let (is_x_const, range) = if p1.0 == p2.0 {
+        (true, (p1.1, p2.1))
+    } else if p1.1 == p2.1 {
+        (false, (p1.0, p2.0))
+    } else {
+        panic!("invalid p1 p2");
+    };
+    let range = if range.0 < range.1 {
+        range.0..=range.1
+    } else {
+        range.1..=range.0
+    };
+    let mut list = vec![];
+    for i in range {
+        let p = if is_x_const { (p1.0, i) } else { (i, p1.1) };
+        list.push(p);
+    }
+    list
+}
 
-pub fn gen_pyramid_surface(low:i32, height: i32) -> PixelSurface {
+pub fn gen_vert_planes(low: i32, height: i32) -> MultiPixelSurface {
+    let vert_points: Vec<u32> = ((low as u32)..=(height as u32)).collect();
+    let line_width = 8_i32;
+    let points = [
+        (-line_width, -line_width),
+        (line_width, -line_width),
+        (line_width, line_width),
+        (-line_width, line_width),
+    ];
+
+    let [a, b, c, d] = points.map(|p| ((p.0 + 32) as u32, (p.1 + 32) as u32));
+    let lines = [
+        (a, b, 0b111_u32),
+        (b, c, 0b001),
+        (c, d, 0b010),
+        (d, a, 0b101),
+    ];
+    let mut multi_surface = vec![];
+    for (p1, p2, color) in lines {
+        let line_points = new_axis_line(p1, p2);
+        multi_surface.extend(
+            line_points
+                .into_iter()
+                .map(|p| (p.0, p.1, (vert_points.clone(), color))),
+        );
+    }
+    multi_surface
+}
+
+pub fn gen_pyramid_surface(low: i32, height: i32) -> PixelSurface {
     let mut pixel_surface = PixelSurface::new();
     for x in 0..64_u32 {
         for y in 0..64_u32 {
             let x_i32 = x as i32 - 32;
             let y_i32 = y as i32 - 32;
-            let h = 32 - (x_i32.abs() + y_i32.abs());
+            let h = (x_i32.abs() + y_i32.abs()) + low;
             if h < low || h > height {
                 continue;
             }
@@ -220,6 +270,85 @@ impl Codec {
                 *c = Some(color);
             } else {
                 panic!("{x}, {y}, {z}, pixel_idx {pixel_idx}");
+            }
+        }
+        angle_map
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    v.into_iter()
+                        .map(|(k, mut v)| {
+                            if pixel_offset > 0 {
+                                let offset = pixel_offset as usize;
+                                v.pixels.rotate_right(offset);
+                                v.pixels.iter_mut().take(offset).for_each(|v| {
+                                    v.take();
+                                });
+                            } else if pixel_offset < 0 {
+                                let offset = (-pixel_offset) as usize;
+                                v.pixels.rotate_left(offset);
+                                v.pixels.iter_mut().rev().take(offset).for_each(|v| {
+                                    v.take();
+                                });
+                            }
+                            ScreenLine {
+                                screen_idx: k.screen_idx,
+                                addr: k.addr,
+                                pixels: v.pixels,
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn encode_multi(
+        &self,
+        multi_pixel_surface: &MultiPixelSurface,
+        pixel_offset: i32,
+    ) -> AngleMap {
+        let mut angle_map: BTreeMap<u32, BTreeMap<ScreenLineAddr, ScreenLinePixels>> =
+            BTreeMap::new();
+        for (x, y, (z_list, color)) in multi_pixel_surface {
+            for &z in z_list.iter() {
+                let z_info_list = self.xy_map.get(&(*x, *y)).unwrap();
+                let z_info_idx = match z_info_list.binary_search_by_key(&z, |v| v.pixel) {
+                    Ok(idx) => idx,
+                    Err(idx) => {
+                        if idx == 0 {
+                            idx
+                        } else if idx >= z_info_list.len() {
+                            idx - 1
+                        } else {
+                            let idx_l = idx - 1;
+                            let l = z_info_list.get(idx_l).unwrap();
+                            let r = z_info_list.get(idx).unwrap();
+                            // let deta_l = z - l.pixel;
+                            // let deta_r = r.pixel - z;
+                            // if deta_l < deta_r
+                            if z * 2 < l.pixel + r.pixel {
+                                idx_l
+                            } else {
+                                idx
+                            }
+                        }
+                    }
+                };
+                let z_info = z_info_list.get(z_info_idx).or(z_info_list.last()).unwrap();
+                let entry = angle_map.entry(z_info.angle).or_default();
+                let addr = ScreenLineAddr {
+                    screen_idx: z_info.screen_pixel.idx,
+                    addr: z_info.screen_pixel.addr,
+                };
+                let line_pixels = entry.entry(addr).or_default();
+                let pixel_idx = z_info.screen_pixel.pixel as usize;
+                if let Some(c) = line_pixels.pixels.get_mut(pixel_idx) {
+                    *c = Some(*color);
+                } else {
+                    panic!("{x}, {y}, {z}, pixel_idx {pixel_idx}");
+                }
             }
         }
         angle_map
@@ -432,12 +561,16 @@ mod tests {
             let mut pixels = "(".to_string();
             for p in line.pixels {
                 match p {
-                    None => {write!(&mut pixels, "_").unwrap();}
-                    Some(c) => {write!(&mut pixels, "{c}").unwrap();}
+                    None => {
+                        write!(&mut pixels, "_").unwrap();
+                    }
+                    Some(c) => {
+                        write!(&mut pixels, "{c}").unwrap();
+                    }
                 }
                 pixels.push(',');
             }
-            buf.push_str(&format!("{}-{}{}",line.screen_idx, line.addr, pixels));
+            buf.push_str(&format!("{}-{}{}", line.screen_idx, line.addr, pixels));
         }
         buf.push(']');
         println!("{buf}");

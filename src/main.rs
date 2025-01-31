@@ -28,10 +28,17 @@ struct AngleInfo {
     lines: u16,
 }
 
-fn gen_pyramid_angle_map(pixel_offset: i32, height: u32) -> AngleMap {
-    let pixel_surface = vdrm_codec::gen_pyramid_surface(-32, height as i32);
+fn gen_pyramid_angle_map(pixel_offset: i32, v: u32) -> AngleMap {
+    let pixel_surface = vdrm_codec::gen_pyramid_surface(v as i32, 32);
     let codec = vdrm_codec::Codec::new();
     let angle_map = codec.encode(&pixel_surface, pixel_offset);
+    angle_map
+}
+
+fn gen_vert_planes_angle_map(pixel_offset: i32, v: u32) -> AngleMap {
+    let pixel_surface = vdrm_codec::gen_vert_planes(v as i32, 32);
+    let codec = vdrm_codec::Codec::new();
+    let angle_map = codec.encode_multi(&pixel_surface, pixel_offset);
     angle_map
 }
 
@@ -105,7 +112,7 @@ fn mock_angle_map2() -> AngleMap {
     AngleMap::from([
         (TOTAL_ANGLES as u32 * 3 / 4, plane0),
         (TOTAL_ANGLES as u32 / 8, plane1),
-        (TOTAL_ANGLES as u32 * 11 / 24, plane2),
+        (TOTAL_ANGLES as u32 * 5 / 12, plane2),
     ])
 }
 
@@ -211,6 +218,7 @@ fn main() {
         "mock" => mock_angle_map(),
         "mock2" => mock_angle_map2(),
         "pyramid" => gen_pyramid_angle_map(pixel_offset, height),
+        "vert_planes" => gen_vert_planes_angle_map(pixel_offset, height),
         _ => gen_plane_angle_map(pixel_offset, height),
     };
     gen_hub75_data(angle_map, 0..TOTAL_ANGLES as u32).write();
@@ -282,8 +290,20 @@ mod test {
                 );
             }
         }
-        let pixels_a: Vec<_> = hub_a.pixel_buf.iter().rev().take(50 * 1024).cloned().collect();
-        let pixels_b: Vec<_> = hub_a.pixel_buf.iter().rev().take(50 * 1024).cloned().collect();
+        let pixels_a: Vec<_> = hub_a
+            .pixel_buf
+            .iter()
+            .rev()
+            .take(50 * 1024)
+            .cloned()
+            .collect();
+        let pixels_b: Vec<_> = hub_a
+            .pixel_buf
+            .iter()
+            .rev()
+            .take(50 * 1024)
+            .cloned()
+            .collect();
         assert_eq!(pixels_a, pixels_b);
         // println!("pixels_a {pixels_a:?}");
         // println!("pixels_b {pixels_b:?}");
