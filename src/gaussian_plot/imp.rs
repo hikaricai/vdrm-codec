@@ -3,82 +3,141 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 
 use std::cell::Cell;
-use std::convert::TryFrom;
 use std::error::Error;
-use std::f64;
+use std::io::Read;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 
+use neocortex::{Cortex, Semaphore};
 use plotters::prelude::*;
 use plotters_cairo::CairoBackend;
-use vdrm_codec::{AngleMap, TOTAL_ANGLES};
 
-const AXES_LEN: f64 = 2.;
+const SCREEN_WIDTH: usize = 256;
+const SCREEN_HEIGHT: usize = 192;
+const AXES_LEN: f32 = 1.2;
 
-// lazy_static::lazy_static!{
-//     static ref CODEC: vdrm_codec::Codec = vdrm_codec::Codec::new();
-//     static ref FLOAT_SURFACES: (vdrm_codec::FloatSurface, vdrm_codec::FloatSurface) = {
-//         gen_float_surface()
-//     };
-// }
+type PointF64 = (f32, f32, f32);
 
-#[derive(Copy, Clone, Eq, PartialEq)]
-struct Params {
-    section_y: u32,
-    pixel_offset: i32,
-    angle_offset: i32,
-}
+type NdsZBuf = [u64; SCREEN_HEIGHT * SCREEN_WIDTH + 1];
 
 struct Surfaces {
-    params: Params,
-    real: vdrm_codec::FloatSurface,
-    emu: vdrm_codec::FloatSurface,
+    cortex: Option<Cortex<NdsZBuf, neocortex::Semaphore>>,
+    z_frame: Box<NdsZBuf>,
+    x_points: Vec<f32>,
+    y_points: Vec<f32>,
+    updated: bool,
 }
+
+impl Surfaces {
+    fn new() -> Self {
+        let width = SCREEN_WIDTH as f32;
+        let height = SCREEN_HEIGHT as f32;
+        let x_points: Vec<_> = (0..SCREEN_WIDTH).map(|v| v as f32 / width).collect();
+        let y_points: Vec<_> = (0..SCREEN_HEIGHT).map(|v| v as f32 / height).collect();
+        let use_shm = true;
+        let (cortex, z_frame) = if use_shm {
+            let key = 2334;
+            let cortex: Cortex<NdsZBuf, Semaphore> = Cortex::attach(key).unwrap();
+            let z_frame = Box::new(cortex.read().unwrap());
+            (Some(cortex), z_frame)
+        } else {
+            const LEN: usize = std::mem::size_of::<NdsZBuf>();
+            let mut content: [u8; LEN] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+            let mut file = std::fs::File::open("frames/1738578316").unwrap();
+            file.read_exact(&mut content).unwrap();
+            let z_frame = unsafe { Box::new(std::mem::transmute(content)) };
+            (None, z_frame)
+        };
+
+        Self {
+            cortex,
+            z_frame,
+            x_points,
+            y_points,
+            updated: false,
+        }
+    }
+
+    fn update(&mut self) -> bool {
+        let Some(cortex) = self.cortex.as_ref() else {
+            return false;
+        };
+        let frame = cortex.read().unwrap();
+        let seconds = frame[0];
+        if self.updated && seconds == self.z_frame[0] {
+            return false;
+        }
+        self.updated = true;
+        const LEN: usize = std::mem::size_of::<NdsZBuf>();
+        assert_eq!(LEN, SCREEN_HEIGHT * SCREEN_WIDTH * 8 + 8);
+        let content: &[u8; LEN] = unsafe { std::mem::transmute(frame.as_ptr()) };
+        std::fs::write(format!("frames/{seconds}"), &content).unwrap();
+        self.z_frame = Box::new(frame);
+        return true;
+    }
+
+    fn iter(&self) -> FrameIter<'_> {
+        FrameIter {
+            p: &self,
+            x: 0,
+            y: 0,
+        }
+    }
+}
+
+struct FrameIter<'a> {
+    p: &'a Surfaces,
+    x: usize,
+    y: usize,
+}
+
+impl<'a> Iterator for FrameIter<'a> {
+    type Item = Rectangle<PointF64>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let step = 1usize;
+        if self.y >= SCREEN_HEIGHT {
+            return None;
+        }
+        let idx = self.x + self.y * SCREEN_WIDTH + 1;
+        let pixel = self.p.z_frame[idx];
+        let abgr = (pixel >> 32) as u32;
+        let [r, g, b, _a] = abgr.to_ne_bytes();
+        // let z = ((pixel & 0xFFFF) as u32 >> 9) & 0xFFF;
+        let mut z = (pixel & 0xFFFF) as u32;
+        if abgr & 0x00FF_FFFF == 0 {
+            z = 0;
+        }
+        let coord = (
+            self.p.x_points[self.x],
+            self.p.y_points[self.y],
+            (z as f32) / 0xFFFF as f32,
+        );
+        const W: f32 = 1. / SCREEN_WIDTH as f32;
+        const H: f32 = 1. / SCREEN_HEIGHT as f32;
+        let points = [coord, (coord.0 + W, coord.1 + H, coord.2)];
+        let mut s: ShapeStyle = RGBColor(r, g, b).into();
+        s.filled = true;
+        let point = Rectangle::new(points, s);
+        self.x += step;
+        if self.x >= SCREEN_WIDTH {
+            self.x = 0;
+            self.y += step;
+        }
+        return Some(point);
+    }
+}
+
 static FLOAT_SURFACES: Mutex<Option<Surfaces>> = Mutex::new(None);
-
-fn gen_float_surface(params: Params) -> Surfaces {
-    let pixel_surface = vdrm_codec::gen_pyramid_surface2();
-    let real_float_surface = vdrm_codec::pixel_surface_to_float(&pixel_surface)
-        .into_iter()
-        .map(|(x, y, z)| (x, z, y))
-        .collect();
-    let codec = vdrm_codec::Codec::new();
-    let mut angle_map = codec.encode(&pixel_surface, params.pixel_offset);
-    if params.angle_offset != 0 {
-        angle_map = angle_map
-            .into_iter()
-            .map(|(mut k, v)| {
-                if params.angle_offset > 0 {
-                    k += params.angle_offset as u32;
-                } else {
-                    k += (TOTAL_ANGLES as i32 + params.angle_offset) as u32;
-                }
-                k %= TOTAL_ANGLES as u32;
-                (k, v)
-            })
-            .collect();
-    }
-
-    let float_surface = codec
-        .decode(angle_map)
-        .into_iter()
-        .map(|(x, y, z)| (x, z, y))
-        .collect();
-    Surfaces {
-        params,
-        real: real_float_surface,
-        emu: float_surface,
-    }
-}
 
 #[derive(Debug, Default, glib::Properties)]
 #[properties(wrapper_type = super::GaussianPlot)]
 pub struct GaussianPlot {
     #[property(get, set, minimum = -1.57, maximum = 1.57)]
-    pitch: Cell<f64>,
-    #[property(get, set, minimum = 0.0, maximum = f64::consts::PI)]
-    yaw: Cell<f64>,
+    pitch: Cell<f32>,
+    #[property(get, set, minimum = 0.0, maximum = std::f32::consts::PI)]
+    yaw: Cell<f32>,
     #[property(get, set, minimum = -10.0, maximum = 10.0)]
-    mean_x: Cell<f64>,
+    mean_x: Cell<f32>,
     #[property(get, set, minimum = -50, maximum = 50)]
     mean_y: Cell<i32>,
     #[property(get, set, minimum = -32, maximum = 32)]
@@ -129,19 +188,35 @@ impl GaussianPlot {
         &self,
         backend: DB,
     ) -> Result<(), Box<dyn Error + 'a>> {
+        static CNT: AtomicUsize = AtomicUsize::new(0);
+        let cnt = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        println!("plot_pdf {cnt}");
+        let mut guard = FLOAT_SURFACES.lock().unwrap();
+        let surfaces = match guard.as_mut() {
+            Some(v) => {
+                if !v.update() {
+                    // return Ok(());
+                }
+                v
+            }
+            None => {
+                guard.replace(Surfaces::new());
+                guard.as_mut().unwrap()
+            }
+        };
         let root = backend.into_drawing_area();
 
         root.fill(&WHITE)?;
 
         let mut chart = ChartBuilder::on(&root).build_cartesian_3d(
-            -AXES_LEN..AXES_LEN,
-            -AXES_LEN..AXES_LEN,
-            -AXES_LEN..AXES_LEN,
+            0.0..AXES_LEN,
+            0.0..AXES_LEN,
+            0.0..AXES_LEN,
         )?;
 
         chart.with_projection(|mut p| {
-            p.pitch = self.pitch.get();
-            p.yaw = self.yaw.get();
+            p.pitch = self.pitch.get() as f64;
+            p.yaw = self.yaw.get() as f64;
             p.scale = 0.7;
             p.into_matrix() // build the projection matrix
         });
@@ -155,44 +230,15 @@ impl GaussianPlot {
         chart
             .draw_series(
                 [
-                    ("x", (AXES_LEN, -AXES_LEN, -AXES_LEN)),
-                    ("y", (-AXES_LEN, AXES_LEN, -AXES_LEN)),
-                    ("z", (-AXES_LEN, -AXES_LEN, AXES_LEN)),
-                    ("", (0., 0., 0.)),
+                    ("x", (AXES_LEN, 0.0, 0.0)),
+                    ("y", (0.0, AXES_LEN, 0.0)),
+                    ("z", (0.0, 0.0, AXES_LEN)),
+                    ("o", (0., 0., 0.)),
                 ]
                 .map(|(label, position)| Text::new(label, position, &axis_title_style)),
             )
             .unwrap();
-
-        let section_y = self.section_y.get();
-        let pixel_offset = self.std_x.get();
-        let angle_offset = self.mean_y.get();
-        let params = Params {
-            section_y,
-            pixel_offset,
-            angle_offset,
-        };
-        let mut guard = FLOAT_SURFACES.lock().unwrap();
-        if guard.as_mut().map(|v| v.params) != Some(params) {
-            let surfaces = gen_float_surface(params);
-            guard.replace(surfaces);
-        }
-        let surfaces = guard.as_ref().unwrap();
-        let total_points: PointSeries<_, _, Circle<_, _>, _> =
-            PointSeries::new(surfaces.real.clone(), 1_f64, &BLUE.mix(0.2));
-        chart.draw_series(total_points).unwrap();
-        let total_points: PointSeries<_, _, Circle<_, _>, _> =
-            PointSeries::new(surfaces.emu.clone(), 1_f64, &RED.mix(0.2));
-        chart.draw_series(total_points).unwrap();
-        // chart.draw_series(
-        //     SurfaceSeries::xoz(
-        //         (-50..=50).map(|x| x as f64 / 5.0),
-        //         (-50..=50).map(|x| x as f64 / 5.0),
-        //         |x, y| self.gaussian_pdf(x, y),
-        //     )
-        //     .style_func(&|&v| (&HSLColor(240.0 / 360.0 - 240.0 / 360.0 * v, 1.0, 0.7)).into()),
-        // )?;
-
+        chart.draw_series(surfaces.iter()).unwrap();
         root.present()?;
         Ok(())
     }
