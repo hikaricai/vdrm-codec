@@ -33,8 +33,10 @@ impl Surfaces {
         let width = SCREEN_WIDTH as f32;
         let height = SCREEN_HEIGHT as f32;
         let x_points: Vec<_> = (0..SCREEN_WIDTH).map(|v| v as f32 / width).collect();
-        let y_points: Vec<_> = (0..SCREEN_HEIGHT).map(|v| v as f32 / height).collect();
-        let use_shm = true;
+        let y_points: Vec<_> = (0..SCREEN_HEIGHT)
+            .map(|v| v as f32 * 0.75 / height)
+            .collect();
+        let use_shm = false;
         let (cortex, z_frame) = if use_shm {
             let key = 2334;
             let cortex: Cortex<NdsZBuf, Semaphore> = Cortex::attach(key).unwrap();
@@ -43,7 +45,7 @@ impl Surfaces {
         } else {
             const LEN: usize = std::mem::size_of::<NdsZBuf>();
             let mut content: [u8; LEN] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-            let mut file = std::fs::File::open("frames/1738578316").unwrap();
+            let mut file = std::fs::File::open("frames/1738589846_rrds").unwrap();
             file.read_exact(&mut content).unwrap();
             let z_frame = unsafe { Box::new(std::mem::transmute(content)) };
             (None, z_frame)
